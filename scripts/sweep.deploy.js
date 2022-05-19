@@ -1,7 +1,7 @@
 const { deployContract } = require('./deploy.js');
 
 async function main() {
-  const sweep = await deployContract("OpenSweep", ["0x3b11562DC5EDBF3889157e71C7AE6754d7aDEa79"])
+  const sweep = await deployContract("OpenSweep", ["0xfCf25150873E65F626aAC31f459d2f5b11306D81"])
 
   console.log("OpenSweep deployed to:", sweep.address);
 }

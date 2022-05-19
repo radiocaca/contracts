@@ -11,3 +11,9 @@ npx hardhat node
 node scripts/erc20.deploy.ts
 npx hardhat help
 ```
+
+## Ropsten Test Network
+```
+OpenSweep:
+0xC412891856583A16A9e954f83Fbf884F47543e08
+```
