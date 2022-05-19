@@ -1,11 +1,24 @@
 import { ethers } from "hardhat";
 import { expect } from "chai";
-import { OpenPFPExchange, OpenSweep, StrategyStandardSaleForFixedPrice, TestERC721, WETH } from "typechain-types";
+import {
+  OpenPFPExchange,
+  OpenSweep,
+  StrategyStandardSaleForFixedPrice,
+  TestERC721,
+  TransferSelectorNFT,
+  WETH,
+} from "typechain-types";
 import { SignerWithAddress } from "@nomiclabs/hardhat-ethers/signers";
 import { TypedDataUtils } from "ethers-eip712";
 import { TypedData } from "ethers-eip712/dist/typed-data";
+import { Signature } from "@ethersproject/bytes";
+import { Signer } from "@ethersproject/abstract-signer";
+import { BigNumber } from "ethers";
 
-async function SignatureWith712Data(makerOrder: any, pfp: string, signer: SignerWithAddress): Promise<string> {
+const bob = "0x9441e3a1b37B3F5280FC53Ee0FbB7C26a912126f";
+const bobKey = "0xaa4ecb19f07913ad5b403f4b36038f39fd3f8153d2cdee113d06b7ef045beb9e";
+
+function SignatureWith712Data(makerOrder: any, pfp: string): Signature {
   const typedData: TypedData = {
     types: {
       EIP712Domain: [
@@ -93,21 +106,31 @@ async function SignatureWith712Data(makerOrder: any, pfp: string, signer: Signer
   const digest = TypedDataUtils.encodeDigest(typedData);
   const digestHex = ethers.utils.hexlify(digest);
   
-  return signer.signMessage(digestHex);
+  const signingKey = new ethers.utils.SigningKey(bobKey);
+  return signingKey.signDigest(digestHex);
 }
 
 describe("OpenSweep", () => {
   let owner: SignerWithAddress;
   let alice: SignerWithAddress;
   let pfp: OpenPFPExchange;
+  let ts: TransferSelectorNFT;
   let sweep: OpenSweep;
   let wETH: WETH;
   let testERC721: TestERC721;
   let sss: StrategyStandardSaleForFixedPrice;
   let nonce: number = 0;
+  let bobWallet: Signer;
   
   beforeEach(async () => {
     [owner, alice] = await ethers.getSigners();
+    
+    await owner.sendTransaction({
+      to: bob,
+      value: ethers.utils.parseEther("100"),
+    });
+    
+    bobWallet = new ethers.Wallet(bobKey, owner.provider);
     
     // deploy WETH
     const wethFactory = await ethers.getContractFactory("WETH");
@@ -147,8 +170,11 @@ describe("OpenSweep", () => {
     let tm1155 = await tm1155Factory.deploy(pfp.address);
     // deploy TransferSelectorNFT
     const tsFactory = await ethers.getContractFactory("TransferSelectorNFT");
-    let ts = await tsFactory.deploy(tm721.address, tm1155.address);
+    ts = await tsFactory.deploy(tm721.address, tm1155.address);
     // init openpfp
+    await cm.addCurrency(wETH.address);
+    expect(await cm.isCurrencyWhitelisted(wETH.address)).to.eq(true);
+    
     await em.addStrategy(sss.address);
     expect(await em.isStrategyWhitelisted(sss.address)).to.eq(true);
     
@@ -163,21 +189,18 @@ describe("OpenSweep", () => {
     sweep = await factory.deploy(pfp.address);
   });
   
-  it("make erc721 order", async () => {
-    const tokenId = ethers.utils.parseEther("1");
-    const tokenPrice = ethers.utils.parseEther("1000");
-    
-    await testERC721.mint(owner.address, tokenId);
+  async function makeOrder(tokenId: string, tokenPrice: BigNumber, taker: string) {
+    await testERC721.mint(bob, tokenId);
+    const transferManager = await ts.checkTransferManagerForToken(testERC721.address);
+    await testERC721.connect(bobWallet).setApprovalForAll(transferManager, true);
     
     const block = await ethers.provider.getBlockNumber();
     const blockBefore = await ethers.provider.getBlock(block);
-    // const chainId = ethers.providers.getNetwork().chainId;
-    // console.log(chainId)
     const timestamp = blockBefore.timestamp;
     
     const makerOrder = {
       isOrderAsk: true,
-      signer: owner.address,
+      signer: bob,
       collection: testERC721.address,
       price: tokenPrice,
       tokenId: tokenId,
@@ -190,27 +213,54 @@ describe("OpenSweep", () => {
       minPercentageToAsk: 9000,
       params: "0x",
       v: 0,
-      s: "",
-      r: "",
+      s: "0x",
+      r: "0x",
     };
     
-    const makerSig = ethers.utils.splitSignature(await SignatureWith712Data(makerOrder, pfp.address, owner));
+    const makerSig = SignatureWith712Data(makerOrder, pfp.address);
     makerOrder.v = makerSig.v;
     makerOrder.r = makerSig.r;
     makerOrder.s = makerSig.s;
     
-    console.log(makerOrder);
-    
     const takerOrder = {
       isOrderAsk: false,
-      taker: alice.address,
+      taker: taker,
       price: tokenPrice,
       tokenId: tokenId,
       minPercentageToAsk: 9000,
       params: "0x",
     };
     
-    await pfp.connect(alice).matchAskWithTakerBidUsingETHAndWETH(takerOrder, makerOrder, { value: tokenPrice });
+    return {
+      maker: makerOrder,
+      taker: takerOrder,
+    };
+  }
+  
+  it("make erc721 order", async () => {
+    const tokenPrice = ethers.utils.parseEther("1");
+    const order = await makeOrder("1", tokenPrice, alice.address);
+    await pfp.connect(alice).matchAskWithTakerBidUsingETHAndWETH(order.taker, order.maker, { value: tokenPrice });
+    expect(await testERC721.ownerOf("1")).to.eq(alice.address);
+  });
+  
+  it("sweep orders", async () => {
+    const tokenPrice = ethers.utils.parseEther("1");
+    
+    let takers = [];
+    let makers = [];
+    for (let i = 0; i < 5; i++) {
+      const order = await makeOrder(i.toString(), tokenPrice, sweep.address);
+      takers.push(order.taker);
+      makers.push(order.maker);
+      nonce++;
+    }
+    
+    await sweep.updateTransferSelectorNFT(ts.address);
+    // await sweep.setOneTimeApproval(wETH.address, pfp.address, tokenPrice.mul(5));
+    
+    await sweep.connect(alice).batchBuyWithETH(takers, makers, true, { value: tokenPrice.mul(5) });
+    expect(await testERC721.ownerOf("0")).to.eq(alice.address);
   });
   
 });

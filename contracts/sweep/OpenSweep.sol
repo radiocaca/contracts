@@ -19,13 +19,33 @@ interface IOpenPFP {
         external;
 }
 
+interface ITransferManagerNFT {
+    function transferNonFungibleToken(
+        address collection,
+        address from,
+        address to,
+        uint256 tokenId,
+        uint256 amount
+    ) external;
+}
+
+interface ITransferSelectorNFT {
+    function checkTransferManagerForToken(address collection) external view returns (address);
+}
+
 contract OpenSweep is Ownable, ReentrancyGuard {
+    // ERC721 interfaceID
+    bytes4 public constant INTERFACE_ID_ERC721 = 0x80ac58cd;
+    // ERC1155 interfaceID
+    bytes4 public constant INTERFACE_ID_ERC1155 = 0xd9b67a26;
+
     struct ERC20Details {
         address[] tokenAddrs;
         uint256[] amounts;
     }
 
     address public openPFP;
+    ITransferSelectorNFT public transferSelectorNFT;
 
     constructor(address _openPFP) {
         openPFP = _openPFP;
@@ -41,6 +61,10 @@ contract OpenSweep is Ownable, ReentrancyGuard {
         token.approve(operator, amount);
     }
 
+    function updateTransferSelectorNFT(address _transferSelectorNFT) external onlyOwner {
+        transferSelectorNFT = ITransferSelectorNFT(_transferSelectorNFT);
+    }
+
     function _transferEth(address _to, uint256 _amount) internal {
         bool callStatus;
         assembly {
@@ -48,16 +72,6 @@ contract OpenSweep is Ownable, ReentrancyGuard {
             callStatus := call(gas(), _to, _amount, 0, 0, 0, 0)
         }
         require(callStatus, "_transferEth: Eth transfer failed");
-    }
-
-    function _checkCallResult(bool _success) internal pure {
-        if (!_success) {
-            // Copy revert reason from call
-            assembly {
-                returndatacopy(0, 0, returndatasize())
-                revert(0, returndatasize())
-            }
-        }
     }
 
     function _returnDust(address[] memory _tokens) internal {
@@ -87,7 +101,7 @@ contract OpenSweep is Ownable, ReentrancyGuard {
             _takerBid,
             _makerAsk
         );
-        (bool success, ) = openPFP.call{ value: _makerAsk.amount }(_data);
+        (bool success, ) = openPFP.call{ value: _makerAsk.price }(_data);
         if (!success && _revertIfTrxFails) {
             // Copy revert reason from call
             assembly {
@@ -95,16 +109,43 @@ contract OpenSweep is Ownable, ReentrancyGuard {
                 revert(0, returndatasize())
             }
         }
+
+        if (success) {
+            _transferNonFungibleToken(
+                _makerAsk.collection,
+                address(this),
+                msg.sender,
+                _makerAsk.tokenId,
+                _makerAsk.amount
+            );
+        }
     }
 
-    function _buyAssetForERC20(OrderTypes.TakerOrder calldata _takerBid, OrderTypes.MakerOrder calldata _makerAsk)
-        internal
-    {
+    function _buyAssetForERC20(
+        OrderTypes.TakerOrder calldata _takerBid,
+        OrderTypes.MakerOrder calldata _makerAsk,
+        bool _revertIfTrxFails
+    ) internal {
         bytes memory _data = abi.encodeWithSelector(IOpenPFP.matchAskWithTakerBid.selector, _takerBid, _makerAsk);
         (bool success, ) = openPFP.call(_data);
 
-        // check if the call passed successfully
-        _checkCallResult(success);
+        if (!success && _revertIfTrxFails) {
+            // Copy revert reason from call
+            assembly {
+                returndatacopy(0, 0, returndatasize())
+                revert(0, returndatasize())
+            }
+        }
+
+        if (success) {
+            _transferNonFungibleToken(
+                _makerAsk.collection,
+                address(this),
+                msg.sender,
+                _makerAsk.tokenId,
+                _makerAsk.amount
+            );
+        }
     }
 
     function batchBuyWithETH(
@@ -131,7 +172,8 @@ contract OpenSweep is Ownable, ReentrancyGuard {
         ERC20Details calldata erc20Details,
         OrderTypes.TakerOrder[] calldata _takerBids,
         OrderTypes.MakerOrder[] calldata _makerAsks,
-        address[] calldata dustTokens
+        address[] calldata dustTokens,
+        bool _revertIfTrxFails
     ) external payable nonReentrant {
         require(_takerBids.length == _makerAsks.length, "makerOrders not match takerOrders");
 
@@ -144,7 +186,7 @@ contract OpenSweep is Ownable, ReentrancyGuard {
 
         // execute trades
         for (uint256 i = 0; i < _takerBids.length; i++) {
-            _buyAssetForERC20(_takerBids[i], _makerAsks[i]);
+            _buyAssetForERC20(_takerBids[i], _makerAsks[i], _revertIfTrxFails);
         }
 
         // return dust tokens (if any)
@@ -229,6 +271,38 @@ contract OpenSweep is Ownable, ReentrancyGuard {
     ) external onlyOwner {
         for (uint256 i = 0; i < ids.length; i++) {
             IERC1155(asset).safeTransferFrom(address(this), recipient, ids[i], amounts[i], "");
+        }
+    }
+
+    /**
+     * @notice Transfer NFT
+     * @param collection address of the token collection
+     * @param from address of the sender
+     * @param to address of the recipient
+     * @param tokenId tokenId
+     * @param amount amount of tokens (1 for ERC721, 1+ for ERC1155)
+     * @dev For ERC721, amount is not used
+     */
+    function _transferNonFungibleToken(
+        address collection,
+        address from,
+        address to,
+        uint256 tokenId,
+        uint256 amount
+    ) internal {
+        if (IERC165(collection).supportsInterface(INTERFACE_ID_ERC721)) {
+            IERC721(collection).safeTransferFrom(from, to, tokenId);
+        } else if (IERC165(collection).supportsInterface(INTERFACE_ID_ERC1155)) {
+            IERC1155(collection).safeTransferFrom(from, to, tokenId, amount, "");
+        } else {
+            // Retrieve the transfer manager address
+            address transferManager = transferSelectorNFT.checkTransferManagerForToken(collection);
+
+            // If no transfer manager found, it returns address(0)
+            require(transferManager != address(0), "Transfer: No NFT transfer manager available");
+
+            // If one is found, transfer the token
+            ITransferManagerNFT(transferManager).transferNonFungibleToken(collection, from, to, tokenId, amount);
         }
     }
 }
