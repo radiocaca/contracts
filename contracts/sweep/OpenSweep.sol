@@ -291,7 +291,7 @@ contract OpenSweep is Ownable, ReentrancyGuard {
         uint256 amount
     ) internal {
         if (IERC165(collection).supportsInterface(INTERFACE_ID_ERC721)) {
-            IERC721(collection).safeTransferFrom(from, to, tokenId);
+            IERC721(collection).transferFrom(from, to, tokenId);
         } else if (IERC165(collection).supportsInterface(INTERFACE_ID_ERC1155)) {
             IERC1155(collection).safeTransferFrom(from, to, tokenId, amount, "");
         } else {

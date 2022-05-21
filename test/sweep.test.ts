@@ -256,7 +256,7 @@ describe("OpenSweep", () => {
       nonce++;
     }
     
-    await sweep.updateTransferSelectorNFT(ts.address);
+    // await sweep.updateTransferSelectorNFT(ts.address);
     // await sweep.setOneTimeApproval(wETH.address, pfp.address, tokenPrice.mul(5));
     
     await sweep.connect(alice).batchBuyWithETH(takers, makers, true, { value: tokenPrice.mul(5) });

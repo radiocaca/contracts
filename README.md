@@ -15,5 +15,5 @@ npx hardhat help
 ## Ropsten Test Network
 ```
 OpenSweep:
-0xC412891856583A16A9e954f83Fbf884F47543e08
+0x6C22645BC755adDA82C2656CeF6f0aF2120CC9cc
 ```
